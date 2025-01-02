@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>Socket.IO chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding-bottom: 3rem;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        #form {
+            background: rgba(0, 0, 0, 0.15);
+            padding: 0.25rem;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            display: flex;
+            height: 3rem;
+            box-sizing: border-box;
+            backdrop-filter: blur(10px);
+        }
+
+        #input {
+            border: none;
+            padding: 0 1rem;
+            flex-grow: 1;
+            border-radius: 2rem;
+            margin: 0.25rem;
+        }
+
+        #input:focus {
+            outline: none;
+        }
+
+        #form>button {
+            background: #333;
+            border: none;
+            padding: 0 1rem;
+            margin: 0.25rem;
+            border-radius: 3px;
+            outline: none;
+            color: #fff;
+        }
+
+        #messages {
+            list-style-type: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        #messages>li {
+            padding: 0.5rem 1rem;
+        }
+
+        #messages>li:nth-child(odd) {
+            background: #efefef;
+        }
+    </style>
+</head>
+
+<body>
+    <ul id="messages"></ul>
+    <form id="form" action="">
+        <input id="input" autocomplete="off" /><button>Send</button>
+    </form>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const form = document.getElementById('form');
+        const input = document.getElementById('input');
+        const messages = document.getElementById('messages');
+
+        const room = window.location.pathname.split('/').pop();
+
+        // Generate RSA key pair if not already present
+        if (!localStorage.getItem('privateKey')) {
+            generateRSAKeyPair().then((keyPair) => {
+                localStorage.setItem('privateKey', keyPair.privateKeyPem);
+                localStorage.setItem('publicKey', keyPair.publicKeyPem);
+                joinRoom();
+            });
+        } else {
+            joinRoom();
+        }
+
+        const publicKey = localStorage.getItem('publicKey');
+        const privateKey = localStorage.getItem('privateKey');
+        const publicKeys = {}; // Store all public keys for the room
+
+        function joinRoom() {
+            const publicKey = localStorage.getItem('publicKey');
+            const privateKey = localStorage.getItem('privateKey');
+            socket.emit('join room', { room, publicKey });
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (input.value) {
+                const message = input.value;
+
+                // Display the message on the client-side immediately
+                addMessageToChat('You', message);
+
+                // Encrypt and send the message for all other users in the room
+                for (const recipientId in publicKeys) {
+                    const encryptedMessage = await encryptTextWithRSA(publicKeys[recipientId], message);
+                    socket.emit('chat message', { room, encryptedMessage });
+                }
+
+                input.value = '';
+            }
+        });
+
+        // Function to add a message to the chat UI
+        function addMessageToChat(sender, message) {
+            const item = document.createElement('li');
+            const p = document.createElement('p');
+            p.textContent = `${sender}: ${message}`;
+            item.appendChild(p);
+            messages.appendChild(item);
+            window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        // Handle receiving public keys of existing users
+        socket.on('existing public keys', (keys) => {
+            keys.forEach(({ id, publicKey }) => {
+                publicKeys[id] = publicKey;
+                console.log(`Existing public key received from ${id}:`, publicKey);
+            });
+        });
+
+        // Handle receiving a new public key
+        socket.on('public key', ({ id, publicKey }) => {
+            publicKeys[id] = publicKey;
+            console.log(`New public key received from ${id}:`, publicKey);
+        });
+
+        // Handle receiving a chat message
+        socket.on('chat message', async ({ id, encryptedMessage }) => {
+            const decryptedMessage = await decryptTextWithRSA(privateKey, encryptedMessage);
+            addMessageToChat(id, decryptedMessage);
+        });
+
+        // Handle user leaving
+        socket.on('user left', (id) => {
+            delete publicKeys[id]; // Remove their public key
+        });
+
+        // Existing RSA encryption/decryption functions (unchanged)
+        async function encryptTextWithRSA(publicKeyPem, text) {
+            const publicKey = await importKeyFromPem(publicKeyPem, "spki", "RSA-OAEP", ["encrypt"]);
+            const encoder = new TextEncoder();
+            const encodedText = encoder.encode(text);
+            const encryptedData = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, encodedText);
+            return btoa(String.fromCharCode(...new Uint8Array(encryptedData)));
+        }
+
+        async function decryptTextWithRSA(privateKeyPem, encryptedBase64) {
+            const privateKey = await importKeyFromPem(privateKeyPem, "pkcs8", "RSA-OAEP", ["decrypt"]);
+            const encryptedData = Uint8Array.from(atob(encryptedBase64), (c) => c.charCodeAt(0));
+            const decryptedData = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, privateKey, encryptedData);
+            const decoder = new TextDecoder();
+            return decoder.decode(decryptedData);
+        }
+
+        async function importKeyFromPem(pem, format, algorithm, keyUsages) {
+            const pemBody = pem
+                .replace(/-----BEGIN .* KEY-----/g, "")
+                .replace(/-----END .* KEY-----/g, "")
+                .replace(/\n/g, "");
+            const binaryKey = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+            return await crypto.subtle.importKey(format, binaryKey.buffer, { name: algorithm, hash: "SHA-256" }, false, keyUsages);
+        }
+
+        async function generateRSAKeyPair() {
+            const keyPair = await crypto.subtle.generateKey(
+                { name: "RSA-OAEP", modulusLength: 4096, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+                true,
+                ["encrypt", "decrypt"]
+            );
+            const publicKey = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+            const privateKey = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+            return {
+                publicKeyPem: convertArrayBufferToPem(publicKey, "PUBLIC KEY"),
+                privateKeyPem: convertArrayBufferToPem(privateKey, "PRIVATE KEY"),
+            };
+        }
+
+        function convertArrayBufferToPem(buffer, label) {
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+            return `-----BEGIN ${label}-----\n${base64.match(/.{1,64}/g).join("\n")}\n-----END ${label}-----`;
+        }
+    </script>
+</body>
+
+</html>
