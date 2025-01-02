@@ -7,62 +7,59 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server);
 
-// Store public keys for each room
-const roomKeys = {};
+// Track users in each room
+const rooms = {};
 
 app.get('/', (req, res) => {
   res.sendFile(join(__dirname, 'index.html'));
 });
 
-app.get('/rooms/:room', (req, res) => {
+app.get('/room/:room', (req, res) => {
   res.sendFile(join(__dirname, 'index.html'));
 });
 
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
-
   socket.on('join room', ({ room, publicKey }) => {
-    // Join the room
+    if (!rooms[room]) rooms[room] = [];
+
+    // Check if the room is full
+    if (rooms[room].length >= 2) {
+      socket.emit('room full');
+      return;
+    }
+
+    // Add user to the room
+    rooms[room].push({ id: socket.id, publicKey });
     socket.join(room);
 
-    // Initialize the room's public key storage if not present
-    if (!roomKeys[room]) {
-      roomKeys[room] = {};
-    }
+    console.log(`User ${socket.id} joined room ${room}`);
 
-    // Store the new user's public key
-    roomKeys[room][socket.id] = publicKey;
+    // Notify the user of existing public keys in the room
+    const existingPublicKeys = rooms[room]
+      .filter((user) => user.id !== socket.id)
+      .map((user) => ({ id: user.id, publicKey: user.publicKey }));
+    socket.emit('existing public keys', existingPublicKeys);
 
-    console.log(`User ${socket.id} joined room ${room} with public key.`);
-
-    // Notify the new user about all existing public keys in the room
-    const existingKeys = Object.entries(roomKeys[room])
-      .filter(([id]) => id !== socket.id) // Exclude the current user
-      .map(([id, key]) => ({ id, publicKey: key }));
-    socket.emit('existing public keys', existingKeys);
-
-    // Notify all other users in the room about the new user's public key
+    // Notify others in the room of the new user's public key
     socket.to(room).emit('public key', { id: socket.id, publicKey });
-  });
 
-  socket.on('chat message', ({ room, encryptedMessage }) => {
-    io.to(room).emit('chat message', { id: socket.id, encryptedMessage });
-  });
-
-  socket.on('disconnect', () => {
-    console.log(`User disconnected: ${socket.id}`);
-
-    // Remove the user's key from the room
-    for (const room in roomKeys) {
-      if (roomKeys[room][socket.id]) {
-        delete roomKeys[room][socket.id];
-        // Notify the other users in the room
-        io.to(room).emit('user left', socket.id);
+    // Handle user disconnect
+    socket.on('disconnect', () => {
+      rooms[room] = rooms[room].filter((user) => user.id !== socket.id);
+      socket.to(room).emit('user left', socket.id);
+      if (rooms[room].length === 0) {
+        delete rooms[room];
       }
-    }
+      console.log(`User ${socket.id} left room ${room}`);
+    });
+
+    // Handle chat messages
+    socket.on('chat message', ({ room, encryptedMessage }) => {
+      socket.to(room).emit('chat message', { id: socket.id, encryptedMessage });
+    });
   });
 });
 
 server.listen(3000, () => {
-  console.log('Server running at http://localhost:3000');
+  console.log('server running at http://localhost:3000');
 });

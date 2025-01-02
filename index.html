@@ -147,6 +147,11 @@
             addMessageToChat(id, decryptedMessage);
         });
 
+        socket.on('room full', () => {
+            alert('Cannot join the room. The room is full.');
+            window.location.href = '/'; // Redirect to the homepage
+        });
+
         // Handle user leaving
         socket.on('user left', (id) => {
             delete publicKeys[id]; // Remove their public key
